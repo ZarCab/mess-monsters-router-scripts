@@ -1,6 +1,6 @@
 #!/bin/sh
 
-# Router Status Script for OpenWRT
+# Router Status Script for OpenWRT - GIT UPDATE TEST
 # Displays comprehensive router information
 
 # Colors for output (if supported)
@@ -54,6 +54,9 @@ calculate_percentage() {
 
 # Clear screen
 clear
+
+# GIT UPDATE TEST - This line was added to test the update system
+echo "🚀 GIT UPDATE TEST: Script updated via GitHub at $(date)"
 
 # Header
 echo "=========================================="
@@ -188,4 +191,4 @@ done
 echo ""
 echo "=========================================="
 echo "Report generated at: $(date)"
-echo "==========================================" 
+echo "=========================================="
