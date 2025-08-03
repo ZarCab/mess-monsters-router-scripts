@@ -260,7 +260,7 @@ process_device_controls() {
         # Use jq for proper JSON parsing
         local devices_json=$(echo "$response" | jq -r '.devices[] | "\(.ip) \(.hasMonsters) \(.ageGroup)"')
         
-        while IFS=' ' read -r ip has_monsters age_group; do
+        echo "$devices_json" | while IFS=' ' read -r ip has_monsters age_group; do
             if [ -n "$ip" ] && [ -n "$has_monsters" ] && [ -n "$age_group" ]; then
                 log_message "Processing device: $ip (monsters: $has_monsters, ageGroup: $age_group)"
                 
@@ -278,7 +278,7 @@ process_device_controls() {
                     remove_dns_filtering_from_ip "$ip"
                 fi
             fi
-        done <<< "$devices_json"
+        done
     else
         # Fallback to grep/sed for basic parsing
         log_message "jq not available, using basic parsing"
