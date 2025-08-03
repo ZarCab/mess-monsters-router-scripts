@@ -2,11 +2,17 @@
 
 # Configuration
 CONFIG_FILE="/etc/mess-monsters/config.json"
-LOG_FILE="/var/log/fast-devices.log"
+LOG_FILE="/var/log/device-controls.log"
 PHYSICAL_INTERFACE="br-lan"
 WAN_INTERFACE="eth0.2"
 MARK_VALUE=5
-STATE_FILE="/tmp/fast-devices-state.txt"
+STATE_FILE="/tmp/device-controls-state.txt"
+
+# DNS Configuration
+OPENDNS_FAMILY_SHIELD_1="208.67.222.123"
+OPENDNS_FAMILY_SHIELD_2="208.67.220.123"
+REGULAR_DNS_1="8.8.8.8"
+REGULAR_DNS_2="1.1.1.1"
 
 # Read configuration
 if [ -f "$CONFIG_FILE" ]; then
@@ -19,25 +25,24 @@ else
     exit 1
 fi
 
-API_URL="${SERVER_URL}/api/router/fast-devices?household_id=${HOUSEHOLD_ID}"
+API_URL="${SERVER_URL}/api/router/device-controls?household_id=${HOUSEHOLD_ID}"
 
 # Logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
 }
 
-# Function to get current fast devices from API
-fetch_fast_devices() {
+# Function to get current device controls from API
+fetch_device_controls() {
     local response=$(curl -s "$API_URL")
     
     if [ -z "$response" ] || ! echo "$response" | grep -q '"success":true'; then
-        log_message "Error fetching devices from API"
+        log_message "Error fetching device controls from API"
         return 1
     fi
     
-    # Extract IPs and sort them
-    echo "$response" | grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
-        grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u
+    # Return the full JSON response for processing
+    echo "$response"
 }
 
 # Function to get current state of fast IPs
@@ -154,7 +159,7 @@ resolve_firebase_ips() {
 
 # Main logic
 main() {
-    log_message "Starting speed update check"
+    log_message "Starting device controls update (speed + DNS)"
     
     # Ensure QoS is set up
     local qos_changed=0
@@ -162,14 +167,17 @@ main() {
         qos_changed=1
     fi
     
-    # Get new device list from API
-    NEW_IPS=$(fetch_fast_devices)
+    # Get device controls from API
+    DEVICE_RESPONSE=$(fetch_device_controls)
     if [ $? -ne 0 ]; then
-        log_message "Failed to fetch devices, keeping current settings"
+        log_message "Failed to fetch device controls, keeping current settings"
         return 1
     fi
     
-    # Always include critical services - Mess Monsters server and Firebase services
+    # Process device controls (both speed and DNS)
+    process_device_controls "$DEVICE_RESPONSE"
+    
+    # Always ensure critical services have fast speed
     # Static fallback IPs (in case DNS resolution fails)
     STATIC_FALLBACK_IPS="51.222.205.215 199.36.158.100 172.217.14.196 142.250.69.68 142.250.69.74 142.250.69.138 142.250.69.42 142.250.69.106"
     
@@ -185,73 +193,138 @@ main() {
         log_message "DNS resolution failed, using static fallback IPs"
     fi
     
-    NEW_IPS=$(echo "$NEW_IPS $STATIC_IPS" | tr ' ' '\n' | sort -u)
-    
-    # Get current fast IPs
-    CURRENT_IPS=$(get_current_fast_ips)
-    
-    # Compare lists using basic shell commands
-    # Find IPs to add (in NEW_IPS but not in CURRENT_IPS)
-    ADDED_IPS=""
-    for ip in $NEW_IPS; do
-        if ! echo "$CURRENT_IPS" | grep -q "^$ip$"; then
-            ADDED_IPS="$ADDED_IPS$ip\n"
-        fi
-    done
-    ADDED_IPS=$(echo -e "$ADDED_IPS" | grep -v '^$')
-    
-    # Find IPs to remove (in CURRENT_IPS but not in NEW_IPS)
-    REMOVED_IPS=""
-    for ip in $CURRENT_IPS; do
-        if ! echo "$NEW_IPS" | grep -q "^$ip$"; then
-            REMOVED_IPS="$REMOVED_IPS$ip\n"
-        fi
-    done
-    REMOVED_IPS=$(echo -e "$REMOVED_IPS" | grep -v '^$')
-    
-    # Check if any changes needed
-    if [ -z "$ADDED_IPS" ] && [ -z "$REMOVED_IPS" ] && [ $qos_changed -eq 0 ]; then
-        log_message "No changes needed"
-        return 0
-    fi
-    
-    # Apply changes
-    if [ -n "$REMOVED_IPS" ]; then
-        log_message "Removing fast speed from: $(echo $REMOVED_IPS | tr '\n' ' ')"
-        for ip in $REMOVED_IPS; do
-            remove_fast_speed_from_ip "$ip"
-        done
-    fi
-    
-    if [ -n "$ADDED_IPS" ]; then
-        log_message "Adding fast speed to: $(echo $ADDED_IPS | tr '\n' ' ')"
-        for ip in $ADDED_IPS; do
-            apply_fast_speed_to_ip "$ip"
-        done
-    fi
-    
     # Always ensure critical services have fast speed
     for ip in $STATIC_IPS; do
         apply_fast_speed_to_ip "$ip" 2>/dev/null
     done
     
-    # Always ensure all fast devices have both download AND upload rules
-    for ip in $NEW_IPS; do
-        apply_fast_speed_to_ip "$ip" 2>/dev/null
-    done
+    log_message "Device controls update completed (speed + DNS)"
+}
+
+# DNS Filtering Functions
+
+# Function to get current DNS-filtered IPs
+get_current_dns_filtered_ips() {
+    # Get IPs that are currently forced to use OpenDNS Family Shield
+    iptables -t nat -L PREROUTING -n | grep "DNAT.*208.67.222.123" | \
+        awk '{print $7}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | \
+        grep "^192.168" | sort -u
+}
+
+# Apply DNS filtering to a single IP (force OpenDNS Family Shield)
+apply_dns_filtering_to_ip() {
+    local ip="$1"
     
-    log_message "Speed update completed"
+    if [ "$TEST_MODE" = "true" ]; then
+        log_message "TEST MODE: Would apply DNS filtering to IP: $ip (OpenDNS Family Shield)"
+        log_message "TEST MODE: Would run: iptables -t nat -A PREROUTING -p udp --dport 53 -s $ip -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1"
+        log_message "TEST MODE: Would run: iptables -t nat -A PREROUTING -p tcp --dport 53 -s $ip -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1"
+        return
+    fi
+    
+    # Remove any existing DNS rules for this IP
+    iptables -t nat -D PREROUTING -p udp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1 2>/dev/null
+    iptables -t nat -D PREROUTING -p tcp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1 2>/dev/null
+    
+    # Add DNS hijacking rules for UDP and TCP DNS requests
+    iptables -t nat -A PREROUTING -p udp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1
+    iptables -t nat -A PREROUTING -p tcp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1
+    
+    log_message "Applied DNS filtering to IP: $ip (OpenDNS Family Shield)"
+}
+
+# Remove DNS filtering from a single IP (allow regular DNS)
+remove_dns_filtering_from_ip() {
+    local ip="$1"
+    
+    if [ "$TEST_MODE" = "true" ]; then
+        log_message "TEST MODE: Would remove DNS filtering from IP: $ip (regular DNS allowed)"
+        log_message "TEST MODE: Would run: iptables -t nat -D PREROUTING -p udp --dport 53 -s $ip -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1"
+        log_message "TEST MODE: Would run: iptables -t nat -D PREROUTING -p tcp --dport 53 -s $ip -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1"
+        return
+    fi
+    
+    # Remove DNS hijacking rules for this IP
+    iptables -t nat -D PREROUTING -p udp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1 2>/dev/null
+    iptables -t nat -D PREROUTING -p tcp --dport 53 -s "$ip" -j DNAT --to-destination $OPENDNS_FAMILY_SHIELD_1 2>/dev/null
+    
+    log_message "Removed DNS filtering from IP: $ip (regular DNS allowed)"
+}
+
+# Process device controls (both speed and DNS)
+process_device_controls() {
+    local response="$1"
+    
+    # Extract device information using jq if available, otherwise use grep/sed
+    if command -v jq >/dev/null 2>&1; then
+        # Use jq for proper JSON parsing
+        local devices_json=$(echo "$response" | jq -r '.devices[] | "\(.ip) \(.hasMonsters) \(.ageGroup)"')
+        
+        while IFS=' ' read -r ip has_monsters age_group; do
+            if [ -n "$ip" ] && [ -n "$has_monsters" ] && [ -n "$age_group" ]; then
+                log_message "Processing device: $ip (monsters: $has_monsters, ageGroup: $age_group)"
+                
+                # Handle speed control
+                if [ "$has_monsters" = "true" ]; then
+                    apply_fast_speed_to_ip "$ip"
+                else
+                    remove_fast_speed_from_ip "$ip"
+                fi
+                
+                # Handle DNS filtering
+                if [ "$age_group" = "child" ]; then
+                    apply_dns_filtering_to_ip "$ip"
+                else
+                    remove_dns_filtering_from_ip "$ip"
+                fi
+            fi
+        done <<< "$devices_json"
+    else
+        # Fallback to grep/sed for basic parsing
+        log_message "jq not available, using basic parsing"
+        
+        # Extract IPs with hasMonsters=true
+        local fast_ips=$(echo "$response" | grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
+            grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u)
+        
+        # Extract IPs with ageGroup="child"
+        local child_ips=$(echo "$response" | grep -A 10 -B 10 '"ageGroup":"child"' | \
+            grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
+            grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u)
+        
+        # Apply speed controls
+        for ip in $fast_ips; do
+            apply_fast_speed_to_ip "$ip"
+        done
+        
+        # Apply DNS filtering
+        for ip in $child_ips; do
+            apply_dns_filtering_to_ip "$ip"
+        done
+    fi
 }
 
 # Handle command line arguments
 case "$1" in
+    --test)
+        echo "=== TEST MODE ENABLED ==="
+        echo "Script will show what it would do without making changes"
+        TEST_MODE="true"
+        main
+        ;;
     --status)
-        echo "=== Current QoS Status ==="
-        echo "Fast device IPs:"
+        echo "=== Current Device Controls Status ==="
+        echo "Fast device IPs (speed control):"
         get_current_fast_ips
+        echo ""
+        echo "DNS-filtered IPs (parental controls):"
+        get_current_dns_filtered_ips
         echo ""
         echo "QoS Classes:"
         tc class show dev $PHYSICAL_INTERFACE
+        echo ""
+        echo "DNS NAT Rules:"
+        iptables -t nat -L PREROUTING -n | grep "DNAT.*208.67.222.123" || echo "No DNS filtering rules found"
         echo ""
         echo "Recent log entries:"
         tail -5 "$LOG_FILE"
