@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # Guest Management Script for Mess Monsters Router
 # Automatically detects new devices and applies guest bandwidth limits
