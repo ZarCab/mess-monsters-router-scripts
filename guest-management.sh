@@ -17,7 +17,7 @@ DHCP_LEASES="/tmp/dhcp.leases"
 DHCP_CONFIG="/etc/config/dhcp"
 GUEST_BANDWIDTH="10mbit"
 API_SERVER="http://messmonsters.kunovo.ai:3456"
-HOUSEHOLD_ID_FILE="/etc/mess-monsters/household-id"
+HOUSEHOLD_ID_FILE="/etc/mess-monsters/config.json"
 
 # Logging function
 log() {
@@ -45,7 +45,8 @@ check_dependencies() {
 # Get household ID for API calls
 get_household_id() {
     if [ -f "$HOUSEHOLD_ID_FILE" ]; then
-        cat "$HOUSEHOLD_ID_FILE" | tr -d '\n'
+        # Extract household_id from JSON config file
+        grep -o '"household_id":"[^"]*"' "$HOUSEHOLD_ID_FILE" | cut -d'"' -f4
     else
         echo ""
     fi
