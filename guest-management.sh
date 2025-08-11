@@ -184,5 +184,75 @@ main() {
     log "Guest management scan completed"
 }
 
-# Run main function
-main "$@"
+# Real-time daemon mode
+daemon_mode() {
+    log "Starting real-time guest monitoring daemon..."
+    echo "Real-time guest monitoring started. Press Ctrl+C to stop."
+    
+    # Check if inotifywait is available
+    if ! command -v inotifywait >/dev/null 2>&1; then
+        log "ERROR: inotifywait not found. Install inotify-tools package."
+        echo "Error: inotify-tools package required for real-time monitoring"
+        echo "Install with: opkg update && opkg install inotify-tools"
+        exit 1
+    fi
+    
+    # Monitor DHCP leases file for changes
+    inotifywait -m "$DHCP_LEASES" -e modify --format '%w %e %T' --timefmt '%Y-%m-%d %H:%M:%S' | while read file event time; do
+        log "Real-time trigger: DHCP lease file modified at $time"
+        echo "[$time] DHCP lease change detected - running guest management..."
+        
+        # Run guest management scan
+        scan_guests_only
+        
+        log "Real-time scan completed"
+    done
+}
+
+# Guest management scan only (for daemon mode)
+scan_guests_only() {
+    # Check dependencies
+    check_dependencies
+    
+    # Run guest management
+    manage_guests
+}
+
+# Display usage information
+show_usage() {
+    echo "Guest Management Script - Usage:"
+    echo ""
+    echo "Manual Mode:"
+    echo "  $0                Run guest management scan once"
+    echo ""
+    echo "Real-Time Mode:"
+    echo "  $0 --daemon       Start real-time monitoring daemon"
+    echo "  $0 -d             Start real-time monitoring daemon (short)"
+    echo ""
+    echo "Other Options:"
+    echo "  $0 --help         Show this help message"
+    echo "  $0 -h             Show this help message"
+    echo ""
+    echo "Examples:"
+    echo "  $0                # Run manual scan"
+    echo "  $0 --daemon       # Start real-time monitoring"
+}
+
+# Main execution logic
+case "$1" in
+    --daemon|-d)
+        daemon_mode
+        ;;
+    --help|-h)
+        show_usage
+        ;;
+    "")
+        # No arguments - run manual mode
+        main
+        ;;
+    *)
+        echo "Unknown option: $1"
+        show_usage
+        exit 1
+        ;;
+esac
