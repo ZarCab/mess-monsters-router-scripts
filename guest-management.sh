@@ -44,10 +44,32 @@ check_dependencies() {
 
 # Get household ID for API calls
 get_household_id() {
+    log "DEBUG: Checking household ID file: $HOUSEHOLD_ID_FILE"
+    
     if [ -f "$HOUSEHOLD_ID_FILE" ]; then
-        # Extract household_id from JSON config file
-        grep -o '"household_id":"[^"]*"' "$HOUSEHOLD_ID_FILE" | cut -d'"' -f4
+        log "DEBUG: Household ID file exists"
+        
+        # Try the original parsing method
+        local household_id=$(grep -o '"household_id":"[^"]*"' "$HOUSEHOLD_ID_FILE" | cut -d'"' -f4)
+        log "DEBUG: Original parsing result: '$household_id' (length: ${#household_id})"
+        
+        # If that fails, try alternative parsing for JSON with spaces
+        if [ -z "$household_id" ]; then
+            log "DEBUG: Original parsing failed, trying alternative method"
+            household_id=$(awk -F'"' '/household_id/ {print $4}' "$HOUSEHOLD_ID_FILE")
+            log "DEBUG: Alternative parsing result: '$household_id' (length: ${#household_id})"
+        fi
+        
+        # If still empty, try sed method
+        if [ -z "$household_id" ]; then
+            log "DEBUG: Alternative parsing failed, trying sed method"
+            household_id=$(sed -n 's/.*"household_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$HOUSEHOLD_ID_FILE")
+            log "DEBUG: Sed parsing result: '$household_id' (length: ${#household_id})"
+        fi
+        
+        echo "$household_id"
     else
+        log "DEBUG: Household ID file not found: $HOUSEHOLD_ID_FILE"
         echo ""
     fi
 }
