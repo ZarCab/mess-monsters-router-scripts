@@ -80,25 +80,27 @@ is_registered_device() {
     grep -q "option mac '$mac'" "$DHCP_CONFIG" 2>/dev/null
 }
 
-# Apply guest bandwidth limit using tc (traffic control)
+# Apply guest bandwidth limit using existing three-lane traffic control
 apply_guest_bandwidth() {
     local ip="$1"
     local mac="$2"
     
-    # Remove any existing rules for this IP
-    tc qdisc del dev br-lan root handle 1: 2>/dev/null
+    # Check if three-lane QoS structure exists
+    if ! tc class show dev br-lan | grep -q "1:20"; then
+        log "WARNING: Three-lane QoS structure not found. Guest may get slow speed."
+        return 1
+    fi
     
-    # Create root qdisc
-    tc qdisc add dev br-lan root handle 1: htb default 30
+    # Add filter to assign guest device to guest lane (1:20)
+    # Remove any existing filters for this IP first
+    tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" 2>/dev/null
+    tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" 2>/dev/null
     
-    # Create class for guest traffic
-    tc class add dev br-lan parent 1: classid 1:1 htb rate "$GUEST_BANDWIDTH" ceil "$GUEST_BANDWIDTH"
+    # Add new filters to assign guest to lane 1:20 (10 Mbps)
+    tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" flowid 1:20
+    tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" flowid 1:20
     
-    # Add filter to match guest IP
-    tc filter add dev br-lan protocol ip parent 1:0 prio 1 u32 match ip dst "$ip" flowid 1:1
-    tc filter add dev br-lan protocol ip parent 1:0 prio 1 u32 match ip src "$ip" flowid 1:1
-    
-    log "Applied $GUEST_BANDWIDTH limit to guest device: $ip ($mac)"
+    log "Applied guest lane (10mbit) to device: $ip ($mac)"
 }
 
 # Send notification to parent app
@@ -113,8 +115,8 @@ notify_parent() {
         return
     fi
     
-    # Prepare JSON payload
-    local json_data="{\"ip\":\"$ip\",\"mac\":\"$mac\",\"hostname\":\"$hostname\",\"householdId\":\"$household_id\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
+    # Prepare JSON payload to match server endpoint
+    local json_data="{\"householdId\":\"$household_id\",\"deviceInfo\":\"$hostname\",\"deviceIP\":\"$ip\",\"deviceMAC\":\"$mac\",\"timestamp\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}"
     
     # Send notification to API
     curl -s -X POST \

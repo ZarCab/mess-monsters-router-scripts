@@ -53,37 +53,65 @@ get_current_fast_ips() {
         grep "^192.168" | sort -u
 }
 
-# Check if QoS is properly set up
+# Check if QoS is properly set up with three-lane system
 check_qos_setup() {
-    # Check if classes exist AND if default is set to slow (20)
-    tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 20" && \
-    tc qdisc show dev $WAN_INTERFACE | grep -q "default 20" && \
+    # Check if classes exist AND if default is set to slow (30) for three-lane system
+    tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 30" && \
+    tc qdisc show dev $WAN_INTERFACE | grep -q "default 30" && \
     tc class show dev $PHYSICAL_INTERFACE | grep -q "1:1" && \
+    tc class show dev $PHYSICAL_INTERFACE | grep -q "1:10" && \
+    tc class show dev $PHYSICAL_INTERFACE | grep -q "1:20" && \
+    tc class show dev $PHYSICAL_INTERFACE | grep -q "1:30" && \
     tc class show dev $WAN_INTERFACE | grep -q "1:1"
 }
 
 # Set up QoS if not already configured
 setup_qos_if_needed() {
     if ! check_qos_setup; then
-        log_message "Setting up QoS structure"
+        log_message "Setting up QoS structure with three lanes"
         
-        # LAN (download) QoS
-        tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
-        tc qdisc add dev $PHYSICAL_INTERFACE root handle 1: htb default 20
-        tc class add dev $PHYSICAL_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
-        tc class add dev $PHYSICAL_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
-        tc class add dev $PHYSICAL_INTERFACE parent 1:1 classid 1:20 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
-        tc qdisc add dev $PHYSICAL_INTERFACE parent 1:10 handle 10: pfifo limit 100
-        tc qdisc add dev $PHYSICAL_INTERFACE parent 1:20 handle 20: pfifo limit 100
+        # LAN (download) QoS - Create three-lane system
+        # Only delete if absolutely necessary (preserve existing rules when possible)
+        if ! tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "htb.*default 30"; then
+            tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
+            tc qdisc add dev $PHYSICAL_INTERFACE root handle 1: htb default 30
+        fi
         
-        # WAN (upload) QoS - slow by default
-        tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
-        tc qdisc add dev $WAN_INTERFACE root handle 1: htb default 20
-        tc class add dev $WAN_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
-        tc class add dev $WAN_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
-        tc class add dev $WAN_INTERFACE parent 1:1 classid 1:20 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
-        tc qdisc add dev $WAN_INTERFACE parent 1:10 handle 10: pfifo limit 100
-        tc qdisc add dev $WAN_INTERFACE parent 1:20 handle 20: pfifo limit 100
+        # Ensure root class exists
+        if ! tc class show dev $PHYSICAL_INTERFACE | grep -q "1:1 root"; then
+            tc class add dev $PHYSICAL_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
+        fi
+        
+        # Create three lanes: Fast (1:10), Guest (1:20), Slow (1:30)
+        tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
+        tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:20 htb rate "10mbit" ceil "10mbit"
+        tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:30 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
+        
+        # Add qdiscs for each lane
+        tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:10 handle 10: pfifo limit 100
+        tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:20 handle 20: pfifo limit 100
+        tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:30 handle 30: pfifo limit 100
+        
+        # WAN (upload) QoS - Create three-lane system
+        if ! tc qdisc show dev $WAN_INTERFACE | grep -q "htb.*default 30"; then
+            tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
+            tc qdisc add dev $WAN_INTERFACE root handle 1: htb default 30
+        fi
+        
+        # Ensure root class exists
+        if ! tc class show dev $WAN_INTERFACE | grep -q "1:1 root"; then
+            tc class add dev $WAN_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
+        fi
+        
+        # Create three lanes for WAN
+        tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
+        tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:20 htb rate "10mbit" ceil "10mbit"
+        tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:30 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
+        
+        # Add qdiscs for WAN lanes
+        tc qdisc replace dev $WAN_INTERFACE parent 1:10 handle 10: pfifo limit 100
+        tc qdisc replace dev $WAN_INTERFACE parent 1:20 handle 20: pfifo limit 100
+        tc qdisc replace dev $WAN_INTERFACE parent 1:30 handle 30: pfifo limit 100
         
         # Add base filters
         tc filter add dev $PHYSICAL_INTERFACE parent 1: protocol ip prio 1 handle $MARK_VALUE fw flowid 1:10
