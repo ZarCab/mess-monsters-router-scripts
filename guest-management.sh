@@ -155,12 +155,15 @@ apply_guest_bandwidth() {
     
     # Verify filters were created
     debug_log "Verifying filters were created..."
-    if tc filter show dev br-lan | grep -q "$ip"; then
-        debug_log "✅ Filters verified for IP $ip"
+    # Convert IP to hex for verification (tc filter show displays IPs in hex format)
+    hex_ip=$(printf "%02x%02x%02x%02x" $(echo "$ip" | tr '.' ' '))
+    debug_log "Checking for filter with hex IP: $hex_ip"
+    if tc filter show dev br-lan | grep -q "$hex_ip.*flowid 1:20"; then
+        debug_log "✅ Filters verified for IP $ip (hex: $hex_ip)"
         log "Applied guest lane (10mbit) to device: $ip ($mac)"
     else
         log "ERROR: Filters not found after creation for IP $ip"
-        debug_log "❌ Filter verification failed"
+        debug_log "❌ Filter verification failed (checked for hex: $hex_ip)"
         return 1
     fi
     
