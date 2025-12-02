@@ -3,6 +3,7 @@
 # Configuration
 CONFIG_FILE="/etc/mess-monsters/config.json"
 LOG_FILE="/var/log/device-controls.log"
+FILTER_LOG="/var/log/filter-operations.log"
 PHYSICAL_INTERFACE="br-lan"
 WAN_INTERFACE="eth0.2"
 MARK_VALUE=5
@@ -30,6 +31,32 @@ API_URL="${SERVER_URL}/api/router/device-controls?household_id=${HOUSEHOLD_ID}"
 # Logging function
 log_message() {
     echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" | tee -a "$LOG_FILE"
+}
+
+# Filter operation logging functions
+get_guest_filter_count() {
+    tc filter show dev $PHYSICAL_INTERFACE 2>/dev/null | grep -c "flowid 1:20" || echo "0"
+}
+
+filter_log() {
+    local action="$1"      # add, del, rebuild, save, restore, snapshot
+    local script="$2"      # update-device-controls
+    local ip="$3"          # IP address or "ALL" for qdisc operations
+    local type="$4"        # dst, src, fw, qdisc
+    local lane="$5"        # 1:10, 1:20, 1:30
+    local result="$6"      # success, failed
+    local count_before="$7"
+    local count_after="$8"
+    local context="$9"     # optional context
+    
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [FILTER-OP] ACTION=$action | SCRIPT=$script | IP=$ip | TYPE=$type | LANE=$lane | RESULT=$result | COUNT_BEFORE=$count_before | COUNT_AFTER=$count_after | CONTEXT=$context" >> "$FILTER_LOG"
+}
+
+filter_snapshot() {
+    local context="$1"  # before-rebuild, after-rebuild, etc
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [FILTER-SNAP] CONTEXT=$context" >> "$FILTER_LOG"
+    tc filter show dev $PHYSICAL_INTERFACE 2>/dev/null | grep -A 1 "flowid 1:20" >> "$FILTER_LOG" || echo "No guest filters found" >> "$FILTER_LOG"
+    echo "---" >> "$FILTER_LOG"
 }
 
 # Function to get current device controls from API
@@ -71,6 +98,9 @@ check_qos_setup() {
 # Save existing guest filters before QoS rebuild
 save_guest_filters() {
     local temp_file="/tmp/guest-filters-backup.txt"
+    local count_before=$(get_guest_filter_count)
+    filter_snapshot "before-save-guest-filters"
+    filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "attempt" "$count_before" "$count_before" "saving-before-rebuild"
     log_message "Saving existing guest filters before QoS rebuild"
     
     # Save all u32 filters that assign to guest lane (1:20)
@@ -78,9 +108,11 @@ save_guest_filters() {
     tc filter show dev $WAN_INTERFACE | grep -A 1 "flowid 1:20" >> "$temp_file" 2>/dev/null
     
     if [ -s "$temp_file" ]; then
+        filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_before" "$count_before" "filters-saved"
         log_message "Guest filters saved to $temp_file"
         return 0
     else
+        filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_before" "$count_before" "no-filters-to-save"
         log_message "No guest filters found to save"
         return 1
     fi
@@ -89,12 +121,15 @@ save_guest_filters() {
 # Restore guest filters after QoS rebuild
 restore_guest_filters() {
     local temp_file="/tmp/guest-filters-backup.txt"
+    local count_after_rebuild=$(get_guest_filter_count)
     
     if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
+        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_after_rebuild" "$count_after_rebuild" "no-filters-to-restore"
         log_message "No guest filters to restore"
         return 0
     fi
     
+    filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "attempt" "$count_after_rebuild" "$count_after_rebuild" "restoring-after-rebuild"
     log_message "Attempting to restore guest filters from backup"
     
     # Parse and restore guest filters
@@ -116,13 +151,17 @@ restore_guest_filters() {
     rm -f "$temp_file"
     
     if [ $restored -gt 0 ]; then
+        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_after_rebuild" "$(get_guest_filter_count)" "restoration-initiated"
         log_message "Guest filter restoration initiated - guest script will reapply filters"
         # Signal guest script to recheck devices (if running)
         if pgrep -f "guest-management.sh" >/dev/null; then
             log_message "Guest management script detected - it will restore guest filters automatically"
         fi
+    else
+        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "failed" "$count_after_rebuild" "$(get_guest_filter_count)" "no-filters-found-in-backup"
     fi
     
+    filter_snapshot "after-restore-guest-filters"
     return 0
 }
 
@@ -137,8 +176,15 @@ setup_qos_if_needed() {
         # LAN (download) QoS - Create three-lane system
         # Only delete if absolutely necessary (preserve existing rules when possible)
         if ! tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "htb.*default" | grep -E "(30|0x30)"; then
+            local count_before_rebuild=$(get_guest_filter_count)
+            filter_snapshot "before-qdisc-del-lan"
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_rebuild" "0" "DELETING-ALL-FILTERS-LAN"
             log_message "Rebuilding LAN QoS structure (default routing issue detected)"
+            log_message "WARNING: This will delete ALL existing filters including guest filters!"
             tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
+            local count_after_del=$(get_guest_filter_count)
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_rebuild" "$count_after_del" "qdisc-deleted-lan"
+            filter_snapshot "after-qdisc-del-lan"
             tc qdisc add dev $PHYSICAL_INTERFACE root handle 1: htb default 30
         else
             log_message "LAN default routing is correct - preserving existing structure"
@@ -161,8 +207,15 @@ setup_qos_if_needed() {
         
         # WAN (upload) QoS - Create three-lane system
         if ! tc qdisc show dev $WAN_INTERFACE | grep -q "htb.*default" | grep -E "(30|0x30)"; then
+            local count_before_wan=$(get_guest_filter_count)
+            filter_snapshot "before-qdisc-del-wan"
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_wan" "0" "DELETING-ALL-FILTERS-WAN"
             log_message "Rebuilding WAN QoS structure (default routing issue detected)"
+            log_message "WARNING: This will delete ALL existing filters including guest filters!"
             tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
+            local count_after_wan_del=$(get_guest_filter_count)
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_wan" "$count_after_wan_del" "qdisc-deleted-wan"
+            filter_snapshot "after-qdisc-del-wan"
             tc qdisc add dev $WAN_INTERFACE root handle 1: htb default 30
         else
             log_message "WAN default routing is correct - preserving existing structure"
@@ -184,16 +237,25 @@ setup_qos_if_needed() {
         tc qdisc replace dev $WAN_INTERFACE parent 1:30 handle 30: pfifo limit 100
         
         # Add base filters
+        local count_before_fast=$(get_guest_filter_count)
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "$count_before_fast" "$count_before_fast" "adding-fast-lane-filter-lan"
         tc filter add dev $PHYSICAL_INTERFACE parent 1: protocol ip prio 1 handle $MARK_VALUE fw flowid 1:10
+        local add_result=$?
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result -eq 0 ] && echo "success" || echo "failed")" "$count_before_fast" "$(get_guest_filter_count)" "fast-lane-filter-lan-added"
         
         # Add filter for WAN (upload) marked packets
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "adding-fast-lane-filter-wan"
         tc filter add dev $WAN_INTERFACE parent 1: protocol ip prio 1 handle $MARK_VALUE fw flowid 1:10
+        local add_result2=$?
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result2 -eq 0 ] && echo "success" || echo "failed")" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "fast-lane-filter-wan-added"
         
         log_message "QoS structure created/repaired with smart safeguards"
+        filter_snapshot "after-qos-rebuild-complete"
         
         # Restore guest filters after QoS rebuild
         restore_guest_filters
         
+        filter_snapshot "after-restore-complete"
         return 0
     else
         log_message "QoS structure is healthy - no changes needed"
@@ -263,6 +325,13 @@ resolve_firebase_ips() {
 
 # Main logic
 main() {
+    # Ensure filter log exists
+    touch "$FILTER_LOG"
+    
+    # Log initial state
+    filter_snapshot "script-start"
+    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "initial-state"
+    
     log_message "Starting device controls update (speed + DNS)"
     
     # Ensure QoS is set up
@@ -303,6 +372,10 @@ main() {
     done
     
     log_message "Device controls update completed (speed + DNS)"
+    
+    # Log final state
+    filter_snapshot "script-end"
+    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "final-state"
 }
 
 # DNS Filtering Functions
@@ -434,13 +507,20 @@ case "$1" in
         tail -5 "$LOG_FILE"
         ;;
     --reset)
+        touch "$FILTER_LOG"
+        local count_before_reset=$(get_guest_filter_count)
+        filter_snapshot "before-reset"
+        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_reset" "0" "RESET-ALL-FILTERS"
         log_message "Resetting all QoS rules"
+        log_message "WARNING: This will delete ALL existing filters including guest filters!"
         tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
         tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
         iptables -t mangle -F PREROUTING
         iptables -t mangle -F FORWARD
         iptables -t mangle -F POSTROUTING
         rm -f "$STATE_FILE"
+        filter_snapshot "after-reset"
+        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_reset" "$(get_guest_filter_count)" "reset-complete"
         log_message "QoS rules cleared"
         ;;
     --force)

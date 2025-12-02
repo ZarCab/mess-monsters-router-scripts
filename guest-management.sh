@@ -13,6 +13,7 @@
 
 # Configuration
 LOG_FILE="/var/log/guest-management.log"
+FILTER_LOG="/var/log/filter-operations.log"
 DHCP_LEASES="/tmp/dhcp.leases"
 DHCP_CONFIG="/etc/config/dhcp"
 GUEST_BANDWIDTH="10mbit"
@@ -29,6 +30,32 @@ log() {
 debug_log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DEBUG] $1" >> "$LOG_FILE"
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DEBUG] $1"  # Also echo to screen
+}
+
+# Filter operation logging functions
+get_filter_count() {
+    tc filter show dev br-lan 2>/dev/null | grep -c "flowid 1:20" || echo "0"
+}
+
+filter_log() {
+    local action="$1"      # add, del, verify, snapshot
+    local script="$2"       # guest-management
+    local ip="$3"           # IP address
+    local type="$4"         # dst, src, both
+    local lane="$5"         # 1:20
+    local result="$6"       # success, failed
+    local count_before="$7"
+    local count_after="$8"
+    local context="$9"      # optional context
+    
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [FILTER-OP] ACTION=$action | SCRIPT=$script | IP=$ip | TYPE=$type | LANE=$lane | RESULT=$result | COUNT_BEFORE=$count_before | COUNT_AFTER=$count_after | CONTEXT=$context" >> "$FILTER_LOG"
+}
+
+filter_snapshot() {
+    local context="$1"  # before-add, after-add, before-del, after-del, etc
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [FILTER-SNAP] CONTEXT=$context" >> "$FILTER_LOG"
+    tc filter show dev br-lan 2>/dev/null | grep -A 1 "flowid 1:20" >> "$FILTER_LOG" || echo "No guest filters found" >> "$FILTER_LOG"
+    echo "---" >> "$FILTER_LOG"
 }
 
 # Check if required files exist
@@ -129,31 +156,60 @@ apply_guest_bandwidth() {
     
     # Add filter to assign guest device to guest lane (1:20)
     # Remove any existing filters for this IP first
+    local count_before=$(get_filter_count)
+    filter_snapshot "before-del-ip-$ip"
     debug_log "Removing existing filters for IP $ip..."
+    filter_log "del" "guest-management" "$ip" "dst" "1:20" "attempt" "$count_before" "$count_before" "removing-dst-filter"
     tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" 2>/dev/null
+    local del_result=$?
+    filter_log "del" "guest-management" "$ip" "dst" "1:20" "$([ $del_result -eq 0 ] && echo "success" || echo "failed")" "$count_before" "$(get_filter_count)" "dst-deleted"
+    
+    filter_log "del" "guest-management" "$ip" "src" "1:20" "attempt" "$(get_filter_count)" "$(get_filter_count)" "removing-src-filter"
     tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" 2>/dev/null
+    local del_result2=$?
+    local count_after_del=$(get_filter_count)
+    filter_log "del" "guest-management" "$ip" "src" "1:20" "$([ $del_result2 -eq 0 ] && echo "success" || echo "failed")" "$count_before" "$count_after_del" "src-deleted"
+    filter_snapshot "after-del-ip-$ip"
     debug_log "✅ Existing filters removed"
     
     # Add new filters to assign guest to lane 1:20 (10 Mbps)
+    local count_before_add=$(get_filter_count)
+    filter_snapshot "before-add-dst-ip-$ip"
     debug_log "Adding download filter (dst) for IP $ip to lane 1:20..."
+    filter_log "add" "guest-management" "$ip" "dst" "1:20" "attempt" "$count_before_add" "$count_before_add" "adding-dst-filter"
     if tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" flowid 1:20; then
+        local count_after_dst=$(get_filter_count)
+        filter_log "add" "guest-management" "$ip" "dst" "1:20" "success" "$count_before_add" "$count_after_dst" "dst-filter-added"
+        filter_snapshot "after-add-dst-ip-$ip"
         debug_log "✅ Download filter added successfully"
     else
+        local count_after_fail=$(get_filter_count)
+        filter_log "add" "guest-management" "$ip" "dst" "1:20" "failed" "$count_before_add" "$count_after_fail" "dst-filter-failed"
         log "ERROR: Failed to add download filter for IP $ip"
         debug_log "❌ Download filter failed"
         return 1
     fi
     
+    local count_before_src=$(get_filter_count)
+    filter_snapshot "before-add-src-ip-$ip"
     debug_log "Adding upload filter (src) for IP $ip to lane 1:20..."
+    filter_log "add" "guest-management" "$ip" "src" "1:20" "attempt" "$count_before_src" "$count_before_src" "adding-src-filter"
     if tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" flowid 1:20; then
+        local count_after_src=$(get_filter_count)
+        filter_log "add" "guest-management" "$ip" "src" "1:20" "success" "$count_before_src" "$count_after_src" "src-filter-added"
+        filter_snapshot "after-add-src-ip-$ip"
         debug_log "✅ Upload filter added successfully"
     else
+        local count_after_fail=$(get_filter_count)
+        filter_log "add" "guest-management" "$ip" "src" "1:20" "failed" "$count_before_src" "$count_after_fail" "src-filter-failed"
         log "ERROR: Failed to add upload filter for IP $ip"
         debug_log "❌ Upload filter failed"
         return 1
     fi
     
     # Verify filters were created
+    local count_after_all=$(get_filter_count)
+    filter_snapshot "after-all-filters-ip-$ip"
     debug_log "Verifying filters were created..."
     # Convert IP to hex for verification (tc filter show displays IPs in hex format)
     hex_ip=$(printf "%02x%02x%02x%02x" $(echo "$ip" | tr '.' ' '))
@@ -161,9 +217,11 @@ apply_guest_bandwidth() {
     # Check if hex IP exists in filters AND if there's a flowid 1:20 nearby
     # (hex IP and flowid are on separate lines in tc output)
     if tc filter show dev br-lan | grep -A 1 "flowid 1:20" | grep -q "$hex_ip"; then
+        filter_log "verify" "guest-management" "$ip" "both" "1:20" "success" "$count_after_all" "$count_after_all" "filters-exist"
         debug_log "✅ Filters verified for IP $ip (hex: $hex_ip)"
         log "Applied guest lane (10mbit) to device: $ip ($mac)"
     else
+        filter_log "verify" "guest-management" "$ip" "both" "1:20" "failed" "$count_after_all" "$count_after_all" "filters-not-found"
         log "ERROR: Filters not found after creation for IP $ip"
         debug_log "❌ Filter verification failed (checked for hex: $hex_ip)"
         return 1
@@ -310,6 +368,14 @@ cleanup_logs() {
     else
         debug_log "No log cleanup needed"
     fi
+    
+    # Clean up filter log (keep last 500 lines - more detailed)
+    if [ -f "$FILTER_LOG" ] && [ $(wc -l < "$FILTER_LOG") -gt 500 ]; then
+        tail -500 "$FILTER_LOG" > "${FILTER_LOG}.tmp"
+        mv "${FILTER_LOG}.tmp" "$FILTER_LOG"
+        debug_log "✅ Filter log cleaned up"
+    fi
+    
     debug_log "=== LOG CLEANUP COMPLETE ==="
 }
 
@@ -320,9 +386,15 @@ main() {
     debug_log "Current working directory: $(pwd)"
     debug_log "Script PID: $$"
     
-    # Ensure log file exists
+    # Ensure log files exist
     touch "$LOG_FILE"
+    touch "$FILTER_LOG"
     debug_log "Log file: $LOG_FILE"
+    debug_log "Filter log: $FILTER_LOG"
+    
+    # Log initial filter state
+    filter_snapshot "script-start"
+    filter_log "snapshot" "guest-management" "N/A" "N/A" "1:20" "success" "$(get_filter_count)" "$(get_filter_count)" "initial-state"
     
     # Check dependencies
     debug_log "Calling check_dependencies..."
@@ -335,6 +407,10 @@ main() {
     # Main guest management
     debug_log "Calling manage_guests..."
     manage_guests
+    
+    # Log final filter state
+    filter_snapshot "script-end"
+    filter_log "snapshot" "guest-management" "N/A" "N/A" "1:20" "success" "$(get_filter_count)" "$(get_filter_count)" "final-state"
     
     debug_log "=== GUEST MANAGEMENT SCRIPT COMPLETED SUCCESSFULLY ==="
 }
