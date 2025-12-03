@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/bin/sh
 #
 # Guest Management Script for Mess Monsters Router
 # Automatically detects new devices and applies guest bandwidth limits
@@ -21,9 +21,48 @@ GUEST_BANDWIDTH="10mbit"
 API_SERVER="http://messmonsters.kunovo.ai:3456"
 HOUSEHOLD_ID_FILE="/etc/mess-monsters/config.json"
 
-# In-memory tracking for current session
-declare -A guest_handles    # MAC -> "dst_handle:src_handle"
-declare -A notified_guests  # MAC -> "ip:hostname" (prevents notification spam)
+# Temporary files for session tracking (POSIX-compliant alternative to associative arrays)
+HANDLES_FILE="/tmp/guest-handles.$$"
+NOTIFIED_FILE="/tmp/guest-notified.$$"
+
+# Cleanup function for temp files
+cleanup_temp_files() {
+    rm -f "$HANDLES_FILE" "$NOTIFIED_FILE"
+}
+trap cleanup_temp_files EXIT
+
+# Helper functions for file-based "associative array" operations
+get_handle() {
+    local mac="$1"
+    grep "^${mac}:" "$HANDLES_FILE" 2>/dev/null | cut -d: -f2-
+}
+
+set_handle() {
+    local mac="$1"
+    local handles="$2"
+    # Remove old entry if exists
+    grep -v "^${mac}:" "$HANDLES_FILE" > "${HANDLES_FILE}.tmp" 2>/dev/null || true
+    # Add new entry
+    echo "${mac}:${handles}" >> "${HANDLES_FILE}.tmp"
+    mv "${HANDLES_FILE}.tmp" "$HANDLES_FILE"
+}
+
+is_notified() {
+    local mac="$1"
+    grep -q "^${mac}:" "$NOTIFIED_FILE" 2>/dev/null
+}
+
+mark_notified() {
+    local mac="$1"
+    local value="$2"
+    echo "${mac}:${value}" >> "$NOTIFIED_FILE"
+}
+
+unmark_notified() {
+    local mac="$1"
+    grep -v "^${mac}:" "$NOTIFIED_FILE" > "${NOTIFIED_FILE}.tmp" 2>/dev/null || true
+    mv "${NOTIFIED_FILE}.tmp" "$NOTIFIED_FILE"
+}
 
 # Logging function
 log() {
@@ -178,7 +217,7 @@ apply_guest_bandwidth() {
     local hex_ip=$(printf "%02x%02x%02x%02x" $(echo "$ip" | tr '.' ' '))
 
     # Try cached handles first (from previous runs in this session)
-    local cached_handles="${guest_handles[$mac]}"
+    local cached_handles=$(get_handle "$mac")
     local dst_handle=""
     local src_handle=""
 
@@ -259,7 +298,7 @@ apply_guest_bandwidth() {
         local filter_output=$(tc filter show dev br-lan 2>/dev/null)
         src_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
         # Cache the handles for this device (MAC -> "dst_handle:src_handle")
-        guest_handles["$mac"]="$dst_handle:$src_handle"
+        set_handle "$mac" "$dst_handle:$src_handle"
         filter_log "add" "guest-management" "$ip" "src" "1:20" "success" "$count_before_src" "$count_after_src" "src-filter-added-handle-$src_handle"
         filter_snapshot "after-add-src-ip-$ip"
         debug_log "✅ Upload filter added successfully (handle: $src_handle)"
@@ -312,14 +351,14 @@ notify_parent() {
     fi
 
     # Check for deduplication - skip if already notified in this session
-    local already_notified="${notified_guests[$mac]}"
-    if [ -n "$already_notified" ]; then
+    if is_notified "$mac"; then
+        local already_notified=$(grep "^${mac}:" "$NOTIFIED_FILE" 2>/dev/null | cut -d: -f2-)
         debug_log "✅ Skipping notification - already notified this session: $already_notified"
         return
     fi
 
     # Mark as notified for this session
-    notified_guests["$mac"]="$ip:$hostname"
+    mark_notified "$mac" "$ip:$hostname"
     debug_log "📝 Marked as notified for session: $mac -> $ip:$hostname"
 
     # Prepare JSON payload with proper escaping
@@ -364,7 +403,7 @@ notify_parent() {
         log "Failed to send parent notification for guest: $ip ($mac)"
         debug_log "❌ Notification failed with exit code $curl_exit_code"
         # Remove from notified list on failure (allow retry)
-        unset notified_guests["$mac"]
+        unmark_notified "$mac"
         debug_log "🔄 Removed from notified list due to failure (will retry next time)"
     fi
 
@@ -396,13 +435,17 @@ cleanup_stale_filters() {
             # Extract hex IP from match line
             local hex_ip=$(echo "$line1" | grep -o 'match [0-9a-f]*/ffffffff' | cut -d' ' -f2 | cut -d'/' -f1)
             if [ -n "$hex_ip" ]; then
-                # Convert hex back to decimal IP
+                # Convert hex back to decimal IP (POSIX-compliant)
                 local ip=""
-                if [ ${#hex_ip} -eq 8 ]; then
-                    local ip1=$((16#${hex_ip:0:2}))
-                    local ip2=$((16#${hex_ip:2:2}))
-                    local ip3=$((16#${hex_ip:4:2}))
-                    local ip4=$((16#${hex_ip:6:2}))
+                if [ $(echo "$hex_ip" | wc -c) -eq 9 ]; then  # 8 chars + newline
+                    local h1=$(echo "$hex_ip" | cut -c1-2)
+                    local h2=$(echo "$hex_ip" | cut -c3-4)
+                    local h3=$(echo "$hex_ip" | cut -c5-6)
+                    local h4=$(echo "$hex_ip" | cut -c7-8)
+                    local ip1=$((0x$h1))
+                    local ip2=$((0x$h2))
+                    local ip3=$((0x$h3))
+                    local ip4=$((0x$h4))
                     ip="$ip1.$ip2.$ip3.$ip4"
                 fi
 
