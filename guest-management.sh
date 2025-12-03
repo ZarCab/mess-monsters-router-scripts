@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Guest Management Script for Mess Monsters Router
 # Automatically detects new devices and applies guest bandwidth limits
@@ -34,7 +34,7 @@ log() {
 # Enhanced debug logging
 debug_log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DEBUG] $1" >> "$LOG_FILE"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DEBUG] $1"  # Also echo to screen
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [DEBUG] $1" >&2  # Also echo to stderr (not stdout)
 }
 
 # JSON string escaping function
@@ -189,8 +189,13 @@ apply_guest_bandwidth() {
     else
         debug_log "No cached handles for $mac, searching tc output..."
         # Find handles from tc filter show
-        dst_handle=$(tc filter show dev br-lan 2>/dev/null | grep -B 1 "match ${hex_ip}/ffffffff at 16" | grep "fh" | awk '{print $NF}' | head -1)
-        src_handle=$(tc filter show dev br-lan 2>/dev/null | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh" | awk '{print $NF}' | head -1)
+        # Handle format: fh 800::800 (on same line as flowid 1:20, before match line)
+        # We need to find the match line, then look at previous line for handle
+        local filter_output=$(tc filter show dev br-lan 2>/dev/null)
+        # Extract handle: look for line with "fh" and "flowid 1:20" that comes before the match line
+        dst_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 16" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
+        src_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
+        debug_log "Extracted handles: dst=$dst_handle, src=$src_handle"
     fi
 
     # Find and delete dst filter by handle (precise deletion)
@@ -231,7 +236,8 @@ apply_guest_bandwidth() {
     if tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" flowid 1:20; then
         local count_after_dst=$(get_filter_count)
         # Get the handle of the newly added filter
-        local dst_handle=$(tc filter show dev br-lan 2>/dev/null | grep -B 1 "match ${hex_ip}/ffffffff at 16" | grep "fh" | awk '{print $NF}' | head -1)
+        local filter_output=$(tc filter show dev br-lan 2>/dev/null)
+        dst_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 16" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
         filter_log "add" "guest-management" "$ip" "dst" "1:20" "success" "$count_before_add" "$count_after_dst" "dst-filter-added-handle-$dst_handle"
         filter_snapshot "after-add-dst-ip-$ip"
         debug_log "✅ Download filter added successfully (handle: $dst_handle)"
@@ -250,7 +256,8 @@ apply_guest_bandwidth() {
     if tc filter add dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" flowid 1:20; then
         local count_after_src=$(get_filter_count)
         # Get the handle of the newly added filter
-        local src_handle=$(tc filter show dev br-lan 2>/dev/null | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh" | awk '{print $NF}' | head -1)
+        local filter_output=$(tc filter show dev br-lan 2>/dev/null)
+        src_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
         # Cache the handles for this device (MAC -> "dst_handle:src_handle")
         guest_handles["$mac"]="$dst_handle:$src_handle"
         filter_log "add" "guest-management" "$ip" "src" "1:20" "success" "$count_before_src" "$count_after_src" "src-filter-added-handle-$src_handle"
