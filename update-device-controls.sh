@@ -34,16 +34,12 @@ log_message() {
 }
 
 # Filter operation logging functions
-get_guest_filter_count() {
-    tc filter show dev $PHYSICAL_INTERFACE 2>/dev/null | grep -c "flowid 1:20" || echo "0"
-}
-
 filter_log() {
     local action="$1"      # add, del, rebuild, save, restore, snapshot
     local script="$2"      # update-device-controls
     local ip="$3"          # IP address or "ALL" for qdisc operations
     local type="$4"        # dst, src, fw, qdisc
-    local lane="$5"        # 1:10, 1:20, 1:30
+    local lane="$5"        # 1:10, 1:30
     local result="$6"      # success, failed
     local count_before="$7"
     local count_after="$8"
@@ -55,7 +51,7 @@ filter_log() {
 filter_snapshot() {
     local context="$1"  # before-rebuild, after-rebuild, etc
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [FILTER-SNAP] CONTEXT=$context" >> "$FILTER_LOG"
-    tc filter show dev $PHYSICAL_INTERFACE 2>/dev/null | grep -A 1 "flowid 1:20" >> "$FILTER_LOG" || echo "No guest filters found" >> "$FILTER_LOG"
+    tc filter show dev $PHYSICAL_INTERFACE 2>/dev/null | grep -A 1 "flowid 1:10\|flowid 1:30" >> "$FILTER_LOG" || echo "No filters found" >> "$FILTER_LOG"
     echo "---" >> "$FILTER_LOG"
 }
 
@@ -80,112 +76,35 @@ get_current_fast_ips() {
         grep "^192.168" | sort -u
 }
 
-# Check if QoS is properly set up with three-lane system
+# Check if QoS is properly set up with two-lane system
 check_qos_setup() {
-    # Check if classes exist AND if default is set to slow (30/0x30) for three-lane system
-    # Note: tc shows default as hex (0x30) but we accept both formats
-    (tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 30" || \
-     tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 0x30") && \
-    (tc qdisc show dev $WAN_INTERFACE | grep -q "default 30" || \
-     tc qdisc show dev $WAN_INTERFACE | grep -q "default 0x30") && \
+    # Check if classes exist AND if default is set to fast (10/0x10) for two-lane system
+    # Note: tc shows default as hex (0x10) but we accept both formats
+    (tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 10" || \
+     tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "default 0x10") && \
+    (tc qdisc show dev $WAN_INTERFACE | grep -q "default 10" || \
+     tc qdisc show dev $WAN_INTERFACE | grep -q "default 0x10") && \
     tc class show dev $PHYSICAL_INTERFACE | grep -q "1:1" && \
     tc class show dev $PHYSICAL_INTERFACE | grep -q "1:10" && \
-    tc class show dev $PHYSICAL_INTERFACE | grep -q "1:20" && \
     tc class show dev $PHYSICAL_INTERFACE | grep -q "1:30" && \
+    ! tc class show dev $PHYSICAL_INTERFACE | grep -q "1:20" && \
     tc class show dev $WAN_INTERFACE | grep -q "1:1"
-}
-
-# Save existing guest filters before QoS rebuild
-save_guest_filters() {
-    local temp_file="/tmp/guest-filters-backup.txt"
-    local count_before=$(get_guest_filter_count)
-    filter_snapshot "before-save-guest-filters"
-    filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "attempt" "$count_before" "$count_before" "saving-before-rebuild"
-    log_message "Saving existing guest filters before QoS rebuild"
-    
-    # Save all u32 filters that assign to guest lane (1:20)
-    tc filter show dev $PHYSICAL_INTERFACE | grep -A 1 "flowid 1:20" > "$temp_file" 2>/dev/null
-    tc filter show dev $WAN_INTERFACE | grep -A 1 "flowid 1:20" >> "$temp_file" 2>/dev/null
-    
-    if [ -s "$temp_file" ]; then
-        filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_before" "$count_before" "filters-saved"
-        log_message "Guest filters saved to $temp_file"
-        return 0
-    else
-        filter_log "save" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_before" "$count_before" "no-filters-to-save"
-        log_message "No guest filters found to save"
-        return 1
-    fi
-}
-
-# Restore guest filters after QoS rebuild
-restore_guest_filters() {
-    local temp_file="/tmp/guest-filters-backup.txt"
-    local count_after_rebuild=$(get_guest_filter_count)
-    
-    if [ ! -f "$temp_file" ] || [ ! -s "$temp_file" ]; then
-        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_after_rebuild" "$count_after_rebuild" "no-filters-to-restore"
-        log_message "No guest filters to restore"
-        return 0
-    fi
-    
-    filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "attempt" "$count_after_rebuild" "$count_after_rebuild" "restoring-after-rebuild"
-    log_message "Attempting to restore guest filters from backup"
-    
-    # Parse and restore guest filters
-    # Note: This is a simplified restoration - guest script will handle full restoration
-    local restored=0
-    
-    # Extract IP addresses from saved filters and notify guest script
-    grep "match" "$temp_file" | while read -r line; do
-        # Extract hex IP from filter match
-        local hex_ip=$(echo "$line" | grep -o 'match [0-9a-f]*/ffffffff' | cut -d' ' -f2 | cut -d'/' -f1)
-        if [ -n "$hex_ip" ]; then
-            # Convert hex to decimal IP (simplified - guest script will handle properly)
-            log_message "Found guest filter for hex IP: $hex_ip"
-            restored=$((restored + 1))
-        fi
-    done
-    
-    # Clean up temp file
-    rm -f "$temp_file"
-    
-    if [ $restored -gt 0 ]; then
-        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "success" "$count_after_rebuild" "$(get_guest_filter_count)" "restoration-initiated"
-        log_message "Guest filter restoration initiated - guest script will reapply filters"
-        # Signal guest script to recheck devices (if running)
-        if pgrep -f "guest-management.sh" >/dev/null; then
-            log_message "Guest management script detected - it will restore guest filters automatically"
-        fi
-    else
-        filter_log "restore" "update-device-controls" "ALL" "guest" "1:20" "failed" "$count_after_rebuild" "$(get_guest_filter_count)" "no-filters-found-in-backup"
-    fi
-    
-    filter_snapshot "after-restore-guest-filters"
-    return 0
 }
 
 # Set up QoS if not already configured
 setup_qos_if_needed() {
     if ! check_qos_setup; then
-        log_message "QoS structure needs repair - implementing smart safeguards"
+        log_message "QoS structure needs repair - implementing 2-lane system"
         
-        # Save existing guest filters before any changes
-        save_guest_filters
-        
-        # LAN (download) QoS - Create three-lane system
+        # LAN (download) QoS - Create two-lane system
         # Only delete if absolutely necessary (preserve existing rules when possible)
-        if ! tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "htb.*default" | grep -E "(30|0x30)"; then
-            local count_before_rebuild=$(get_guest_filter_count)
-            filter_snapshot "before-qdisc-del-lan"
-            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_rebuild" "0" "DELETING-ALL-FILTERS-LAN"
+        if ! tc qdisc show dev $PHYSICAL_INTERFACE | grep -q "htb.*default" | grep -E "(10|0x10)"; then
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "0" "0" "DELETING-ALL-FILTERS-LAN"
             log_message "Rebuilding LAN QoS structure (default routing issue detected)"
-            log_message "WARNING: This will delete ALL existing filters including guest filters!"
+            log_message "WARNING: This will delete ALL existing filters!"
             tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
-            local count_after_del=$(get_guest_filter_count)
-            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_rebuild" "$count_after_del" "qdisc-deleted-lan"
-            filter_snapshot "after-qdisc-del-lan"
-            tc qdisc add dev $PHYSICAL_INTERFACE root handle 1: htb default 30
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "0" "0" "qdisc-deleted-lan"
+            tc qdisc add dev $PHYSICAL_INTERFACE root handle 1: htb default 10
         else
             log_message "LAN default routing is correct - preserving existing structure"
         fi
@@ -195,28 +114,22 @@ setup_qos_if_needed() {
             tc class add dev $PHYSICAL_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
         fi
         
-        # Create three lanes: Fast (1:10), Guest (1:20), Slow (1:30)
+        # Create two lanes: Fast (1:10), Slow (1:30)
         tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
-        tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:20 htb rate "10mbit" ceil "10mbit"
         tc class replace dev $PHYSICAL_INTERFACE parent 1:1 classid 1:30 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
         
         # Add qdiscs for each lane
         tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:10 handle 10: pfifo limit 100
-        tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:20 handle 20: pfifo limit 100
         tc qdisc replace dev $PHYSICAL_INTERFACE parent 1:30 handle 30: pfifo limit 100
         
-        # WAN (upload) QoS - Create three-lane system
-        if ! tc qdisc show dev $WAN_INTERFACE | grep -q "htb.*default" | grep -E "(30|0x30)"; then
-            local count_before_wan=$(get_guest_filter_count)
-            filter_snapshot "before-qdisc-del-wan"
-            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_wan" "0" "DELETING-ALL-FILTERS-WAN"
+        # WAN (upload) QoS - Create two-lane system
+        if ! tc qdisc show dev $WAN_INTERFACE | grep -q "htb.*default" | grep -E "(10|0x10)"; then
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "0" "0" "DELETING-ALL-FILTERS-WAN"
             log_message "Rebuilding WAN QoS structure (default routing issue detected)"
-            log_message "WARNING: This will delete ALL existing filters including guest filters!"
+            log_message "WARNING: This will delete ALL existing filters!"
             tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
-            local count_after_wan_del=$(get_guest_filter_count)
-            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_wan" "$count_after_wan_del" "qdisc-deleted-wan"
-            filter_snapshot "after-qdisc-del-wan"
-            tc qdisc add dev $WAN_INTERFACE root handle 1: htb default 30
+            filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "0" "0" "qdisc-deleted-wan"
+            tc qdisc add dev $WAN_INTERFACE root handle 1: htb default 10
         else
             log_message "WAN default routing is correct - preserving existing structure"
         fi
@@ -226,36 +139,39 @@ setup_qos_if_needed() {
             tc class add dev $WAN_INTERFACE parent 1: classid 1:1 htb rate 1000mbit
         fi
         
-        # Create three lanes for WAN
+        # Create two lanes for WAN
         tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:10 htb rate "$FAST_SPEED" ceil "$FAST_SPEED"
-        tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:20 htb rate "10mbit" ceil "10mbit"
         tc class replace dev $WAN_INTERFACE parent 1:1 classid 1:30 htb rate "$SLOW_SPEED" ceil "$SLOW_SPEED"
         
         # Add qdiscs for WAN lanes
         tc qdisc replace dev $WAN_INTERFACE parent 1:10 handle 10: pfifo limit 100
-        tc qdisc replace dev $WAN_INTERFACE parent 1:20 handle 20: pfifo limit 100
         tc qdisc replace dev $WAN_INTERFACE parent 1:30 handle 30: pfifo limit 100
         
-        # Add base filters
-        local count_before_fast=$(get_guest_filter_count)
-        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "$count_before_fast" "$count_before_fast" "adding-fast-lane-filter-lan"
+        # Add base filters for fast lane (MARK 0x5)
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "0" "0" "adding-fast-lane-filter-lan"
         tc filter add dev $PHYSICAL_INTERFACE parent 1: protocol ip prio 1 handle $MARK_VALUE fw flowid 1:10
         local add_result=$?
-        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result -eq 0 ] && echo "success" || echo "failed")" "$count_before_fast" "$(get_guest_filter_count)" "fast-lane-filter-lan-added"
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result -eq 0 ] && echo "success" || echo "failed")" "0" "0" "fast-lane-filter-lan-added"
         
-        # Add filter for WAN (upload) marked packets
-        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "adding-fast-lane-filter-wan"
+        # Add filter for WAN (upload) fast lane marked packets
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "attempt" "0" "0" "adding-fast-lane-filter-wan"
         tc filter add dev $WAN_INTERFACE parent 1: protocol ip prio 1 handle $MARK_VALUE fw flowid 1:10
         local add_result2=$?
-        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result2 -eq 0 ] && echo "success" || echo "failed")" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "fast-lane-filter-wan-added"
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:10" "$([ $add_result2 -eq 0 ] && echo "success" || echo "failed")" "0" "0" "fast-lane-filter-wan-added"
         
-        log_message "QoS structure created/repaired with smart safeguards"
-        filter_snapshot "after-qos-rebuild-complete"
+        # Add base filters for slow lane (MARK 0x6)
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:30" "attempt" "0" "0" "adding-slow-lane-filter-lan"
+        tc filter add dev $PHYSICAL_INTERFACE parent 1: protocol ip prio 1 handle 6 fw flowid 1:30
+        local add_result3=$?
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:30" "$([ $add_result3 -eq 0 ] && echo "success" || echo "failed")" "0" "0" "slow-lane-filter-lan-added"
         
-        # Restore guest filters after QoS rebuild
-        restore_guest_filters
+        # Add filter for WAN (upload) slow lane marked packets
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:30" "attempt" "0" "0" "adding-slow-lane-filter-wan"
+        tc filter add dev $WAN_INTERFACE parent 1: protocol ip prio 1 handle 6 fw flowid 1:30
+        local add_result4=$?
+        filter_log "add" "update-device-controls" "MARKED" "fw" "1:30" "$([ $add_result4 -eq 0 ] && echo "success" || echo "failed")" "0" "0" "slow-lane-filter-wan-added"
         
-        filter_snapshot "after-restore-complete"
+        log_message "QoS structure created/repaired with 2-lane system (fast default)"
         return 0
     else
         log_message "QoS structure is healthy - no changes needed"
@@ -295,6 +211,40 @@ remove_fast_speed_from_ip() {
     log_message "Removed fast speed for IP: $ip"
 }
 
+# Apply slow speed to a single IP (MARK 0x6)
+apply_slow_speed_to_ip() {
+    local ip="$1"
+    local slow_mark=6
+    
+    # Check and add download rules if missing
+    if ! iptables -t mangle -C FORWARD -d "$ip" -j MARK --set-mark $slow_mark 2>/dev/null; then
+        iptables -t mangle -I PREROUTING 1 -d "$ip" -j MARK --set-mark $slow_mark
+        iptables -t mangle -I FORWARD 1 -d "$ip" -j MARK --set-mark $slow_mark
+    fi
+    
+    # Check and add upload rules if missing
+    if ! iptables -t mangle -C POSTROUTING -s "$ip" -j MARK --set-mark $slow_mark 2>/dev/null; then
+        iptables -t mangle -I POSTROUTING 1 -s "$ip" -j MARK --set-mark $slow_mark
+    fi
+    
+    log_message "Added slow speed for IP: $ip"
+}
+
+# Remove slow speed from a single IP
+remove_slow_speed_from_ip() {
+    local ip="$1"
+    local slow_mark=6
+    
+    # Remove marking rules for DOWNLOAD (to this IP)
+    iptables -t mangle -D PREROUTING -d "$ip" -j MARK --set-mark $slow_mark 2>/dev/null
+    iptables -t mangle -D FORWARD -d "$ip" -j MARK --set-mark $slow_mark 2>/dev/null
+    
+    # Remove marking rules for UPLOAD (from this IP)
+    iptables -t mangle -D POSTROUTING -s "$ip" -j MARK --set-mark $slow_mark 2>/dev/null
+    
+    log_message "Removed slow speed for IP: $ip"
+}
+
 # Function to resolve Firebase domains to IPs
 resolve_firebase_ips() {
     local cache_file="/tmp/firebase-ips-cache.txt"
@@ -330,7 +280,7 @@ main() {
     
     # Log initial state
     filter_snapshot "script-start"
-    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "initial-state"
+    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "0" "0" "initial-state"
     
     log_message "Starting device controls update (speed + DNS)"
     
@@ -375,7 +325,7 @@ main() {
     
     # Log final state
     filter_snapshot "script-end"
-    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "$(get_guest_filter_count)" "$(get_guest_filter_count)" "final-state"
+    filter_log "snapshot" "update-device-controls" "N/A" "N/A" "ALL" "success" "0" "0" "final-state"
 }
 
 # DNS Filtering Functions
@@ -432,6 +382,11 @@ remove_dns_filtering_from_ip() {
 process_device_controls() {
     local response="$1"
     
+    # Get list of IPs from API response for stale mark cleanup
+    local api_ips=""
+    local api_ips_file="/tmp/api-ips-$$.txt"
+    > "$api_ips_file"  # Create empty file
+    
     # Extract device information using jq if available, otherwise use grep/sed
     if command -v jq >/dev/null 2>&1; then
         # Use jq for proper JSON parsing
@@ -441,11 +396,18 @@ process_device_controls() {
             if [ -n "$ip" ] && [ -n "$has_monsters" ] && [ -n "$age_group" ]; then
                 log_message "Processing device: $ip (monsters: $has_monsters, ageGroup: $age_group)"
                 
+                # Track IPs in API response (write to file to avoid subshell issue)
+                echo "$ip" >> "$api_ips_file"
+                
                 # Handle speed control
                 if [ "$has_monsters" = "true" ]; then
+                    # Remove slow mark if exists, then apply fast mark
+                    remove_slow_speed_from_ip "$ip" 2>/dev/null
                     apply_fast_speed_to_ip "$ip"
                 else
-                    remove_fast_speed_from_ip "$ip"
+                    # Remove fast mark if exists, then apply slow mark
+                    remove_fast_speed_from_ip "$ip" 2>/dev/null
+                    apply_slow_speed_to_ip "$ip"
                 fi
                 
                 # Handle DNS filtering
@@ -456,6 +418,28 @@ process_device_controls() {
                 fi
             fi
         done
+        
+        # Clean up stale marks for devices not in API response
+        # Get all IPs with fast marks (MARK 0x5)
+        get_current_fast_ips | while read -r marked_ip; do
+            if ! grep -q "^${marked_ip}$" "$api_ips_file" 2>/dev/null; then
+                log_message "Removing stale fast mark (MARK 0x5) for IP not in API: $marked_ip"
+                remove_fast_speed_from_ip "$marked_ip" 2>/dev/null
+            fi
+        done
+        
+        # Get all IPs with slow marks (MARK 0x6)
+        iptables -t mangle -L FORWARD -n | grep "MARK set 0x6" | \
+            awk '{print $5}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | \
+            grep "^192.168" | sort -u | while read -r marked_ip; do
+            if ! grep -q "^${marked_ip}$" "$api_ips_file" 2>/dev/null; then
+                log_message "Removing stale slow mark (MARK 0x6) for IP not in API: $marked_ip"
+                remove_slow_speed_from_ip "$marked_ip" 2>/dev/null
+            fi
+        done
+        
+        # Clean up temp file
+        rm -f "$api_ips_file"
     else
         # Fallback to grep/sed for basic parsing
         log_message "jq not available, using basic parsing"
@@ -464,15 +448,53 @@ process_device_controls() {
         local fast_ips=$(echo "$response" | grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
             grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u)
         
+        # Extract IPs with hasMonsters=false
+        local slow_ips=$(echo "$response" | grep -A 5 -B 5 '"hasMonsters":false' | \
+            grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
+            grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u)
+        
         # Extract IPs with ageGroup="child"
         local child_ips=$(echo "$response" | grep -A 10 -B 10 '"ageGroup":"child"' | \
             grep -o '"ip":"[^"]*"' | cut -d'"' -f4 | \
             grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | sort -u)
         
+        # Track all API IPs for stale cleanup (write to file to avoid subshell issue)
+        local api_ips_file="/tmp/api-ips-$$.txt"
+        > "$api_ips_file"  # Create empty file
+        for ip in $fast_ips $slow_ips; do
+            echo "$ip" >> "$api_ips_file"
+        done
+        
         # Apply speed controls
         for ip in $fast_ips; do
+            remove_slow_speed_from_ip "$ip" 2>/dev/null
             apply_fast_speed_to_ip "$ip"
         done
+        
+        for ip in $slow_ips; do
+            remove_fast_speed_from_ip "$ip" 2>/dev/null
+            apply_slow_speed_to_ip "$ip"
+        done
+        
+        # Clean up stale marks
+        get_current_fast_ips | while read -r marked_ip; do
+            if ! grep -q "^${marked_ip}$" "$api_ips_file" 2>/dev/null; then
+                log_message "Removing stale fast mark (MARK 0x5) for IP not in API: $marked_ip"
+                remove_fast_speed_from_ip "$marked_ip" 2>/dev/null
+            fi
+        done
+        
+        iptables -t mangle -L FORWARD -n | grep "MARK set 0x6" | \
+            awk '{print $5}' | grep -E '^([0-9]{1,3}\.){3}[0-9]{1,3}$' | \
+            grep "^192.168" | sort -u | while read -r marked_ip; do
+            if ! grep -q "^${marked_ip}$" "$api_ips_file" 2>/dev/null; then
+                log_message "Removing stale slow mark (MARK 0x6) for IP not in API: $marked_ip"
+                remove_slow_speed_from_ip "$marked_ip" 2>/dev/null
+            fi
+        done
+        
+        # Clean up temp file
+        rm -f "$api_ips_file"
         
         # Apply DNS filtering
         for ip in $child_ips; do
@@ -508,11 +530,10 @@ case "$1" in
         ;;
     --reset)
         touch "$FILTER_LOG"
-        local count_before_reset=$(get_guest_filter_count)
         filter_snapshot "before-reset"
-        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "$count_before_reset" "0" "RESET-ALL-FILTERS"
+        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "warning" "0" "0" "RESET-ALL-FILTERS"
         log_message "Resetting all QoS rules"
-        log_message "WARNING: This will delete ALL existing filters including guest filters!"
+        log_message "WARNING: This will delete ALL existing filters!"
         tc qdisc del dev $PHYSICAL_INTERFACE root 2>/dev/null
         tc qdisc del dev $WAN_INTERFACE root 2>/dev/null
         iptables -t mangle -F PREROUTING
@@ -520,7 +541,7 @@ case "$1" in
         iptables -t mangle -F POSTROUTING
         rm -f "$STATE_FILE"
         filter_snapshot "after-reset"
-        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "$count_before_reset" "$(get_guest_filter_count)" "reset-complete"
+        filter_log "rebuild" "update-device-controls" "ALL" "qdisc" "ALL" "success" "0" "0" "reset-complete"
         log_message "QoS rules cleared"
         ;;
     --force)
