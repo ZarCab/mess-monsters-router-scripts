@@ -208,7 +208,7 @@ apply_guest_bandwidth() {
     fi
     
     # Add filter to assign guest device to guest lane (1:20)
-    # Remove any existing filters for this IP first (by handle for precision)
+    # Remove any existing filters for this IP first (match-based deletion - more reliable)
     local count_before=$(get_filter_count)
     filter_snapshot "before-del-ip-$ip"
     debug_log "Removing existing filters for IP $ip..."
@@ -216,56 +216,73 @@ apply_guest_bandwidth() {
     # Convert IP to hex for matching (tc shows IPs in hex format)
     local hex_ip=$(printf "%02x%02x%02x%02x" $(echo "$ip" | tr '.' ' '))
 
-    # Try cached handles first (from previous runs in this session)
+    # PRIMARY METHOD: Delete ALL matching filters using match criteria (handles duplicates)
+    # This is more reliable than handle-based deletion when there are many filters
+    local deleted_count=0
+    local max_deletions=50  # Safety limit to prevent infinite loops
+    
+    # Delete ALL dst filters for this IP (loop until none found)
+    filter_log "del" "guest-management" "$ip" "dst" "1:20" "attempt" "$count_before" "$count_before" "removing-all-dst-filters"
+    while [ $deleted_count -lt $max_deletions ]; do
+        if tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip dst "$ip" flowid 1:20 2>/dev/null; then
+            deleted_count=$((deleted_count + 1))
+            debug_log "Deleted dst filter #$deleted_count for IP $ip"
+        else
+            break  # No more filters to delete
+        fi
+    done
+    
+    local count_after_dst=$(get_filter_count)
+    filter_log "del" "guest-management" "$ip" "dst" "1:20" "success" "$count_before" "$count_after_dst" "deleted-$deleted_count-dst-filters"
+    
+    # Delete ALL src filters for this IP (loop until none found)
+    deleted_count=0
+    filter_log "del" "guest-management" "$ip" "src" "1:20" "attempt" "$count_after_dst" "$count_after_dst" "removing-all-src-filters"
+    while [ $deleted_count -lt $max_deletions ]; do
+        if tc filter del dev br-lan protocol ip parent 1:0 prio 2 u32 match ip src "$ip" flowid 1:20 2>/dev/null; then
+            deleted_count=$((deleted_count + 1))
+            debug_log "Deleted src filter #$deleted_count for IP $ip"
+        else
+            break  # No more filters to delete
+        fi
+    done
+    
+    local count_after_del=$(get_filter_count)
+    filter_log "del" "guest-management" "$ip" "src" "1:20" "success" "$count_after_dst" "$count_after_del" "deleted-$deleted_count-src-filters"
+    filter_snapshot "after-del-ip-$ip"
+    
+    if [ $deleted_count -gt 2 ]; then
+        log "WARNING: Deleted $deleted_count duplicate filters for IP $ip (expected max 2)"
+    fi
+    debug_log "✅ Existing filters removed (match-based deletion, removed duplicates)"
+    
+    # Now try to extract handles for caching (for future use, but not required)
     local cached_handles=$(get_handle "$mac")
     local dst_handle=""
     local src_handle=""
-
-    if [ -n "$cached_handles" ]; then
-        debug_log "Using cached handles for $mac: $cached_handles"
-        dst_handle=$(echo "$cached_handles" | cut -d: -f1)
-        src_handle=$(echo "$cached_handles" | cut -d: -f2)
-    else
-        debug_log "No cached handles for $mac, searching tc output..."
-        # Find handles from tc filter show
-        # Handle format: fh 800::800 (on same line as flowid 1:20, before match line)
-        # We need to find the match line, then look at previous line for handle
+    
+    if [ -z "$cached_handles" ]; then
+        # Try to extract handles from current filters (for caching, but deletion already worked)
         local filter_output=$(tc filter show dev br-lan 2>/dev/null)
-        # Extract handle: look for line with "fh" and "flowid 1:20" that comes before the match line
         dst_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 16" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
         src_handle=$(echo "$filter_output" | grep -B 1 "match ${hex_ip}/ffffffff at 12" | grep "fh.*flowid 1:20" | sed -n 's/.*fh \([0-9a-f:]\+\)[[:space:]].*/\1/p' | head -1)
-        debug_log "Extracted handles: dst=$dst_handle, src=$src_handle"
     fi
-
-    # Find and delete dst filter by handle (precise deletion)
-    filter_log "del" "guest-management" "$ip" "dst" "1:20" "attempt" "$count_before" "$count_before" "removing-dst-filter"
-    local del_result=1
-    if [ -n "$dst_handle" ]; then
-        debug_log "Deleting dst filter handle: $dst_handle for IP $ip"
-        tc filter del dev br-lan protocol ip parent 1:0 handle "$dst_handle" prio 2 2>/dev/null
-        del_result=$?
-    else
-        debug_log "No existing dst filter found for IP $ip (handle not found)"
-        del_result=0  # Not an error if filter doesn't exist
+    
+    # Check if filters already exist before adding (safety check to prevent accumulation)
+    # Check for both dst and src filters
+    local filter_output=$(tc filter show dev br-lan 2>/dev/null)
+    local has_dst=$(echo "$filter_output" | grep -A 1 "flowid 1:20" | grep -q "match ${hex_ip}/ffffffff at 16" && echo "1" || echo "0")
+    local has_src=$(echo "$filter_output" | grep -A 1 "flowid 1:20" | grep -q "match ${hex_ip}/ffffffff at 12" && echo "1" || echo "0")
+    
+    if [ "$has_dst" = "1" ] && [ "$has_src" = "1" ]; then
+        debug_log "✅ Filters already exist for IP $ip (dst and src), skipping add to prevent accumulation"
+        log "Filters already exist for IP $ip, skipping addition"
+        # Still cache handles if we found them
+        if [ -n "$dst_handle" ] && [ -n "$src_handle" ]; then
+            set_handle "$mac" "$dst_handle:$src_handle"
+        fi
+        return 0  # Success - filters already in place
     fi
-    filter_log "del" "guest-management" "$ip" "dst" "1:20" "$([ $del_result -eq 0 ] && echo "success" || echo "failed")" "$count_before" "$(get_filter_count)" "dst-deleted-by-handle-$dst_handle"
-
-    # Find and delete src filter by handle (precise deletion)
-    local count_after_dst=$(get_filter_count)
-    filter_log "del" "guest-management" "$ip" "src" "1:20" "attempt" "$count_after_dst" "$count_after_dst" "removing-src-filter"
-    local del_result2=1
-    if [ -n "$src_handle" ]; then
-        debug_log "Deleting src filter handle: $src_handle for IP $ip"
-        tc filter del dev br-lan protocol ip parent 1:0 handle "$src_handle" prio 2 2>/dev/null
-        del_result2=$?
-    else
-        debug_log "No existing src filter found for IP $ip (handle not found)"
-        del_result2=0  # Not an error if filter doesn't exist
-    fi
-    local count_after_del=$(get_filter_count)
-    filter_log "del" "guest-management" "$ip" "src" "1:20" "$([ $del_result2 -eq 0 ] && echo "success" || echo "failed")" "$count_after_dst" "$count_after_del" "src-deleted-by-handle-$src_handle"
-    filter_snapshot "after-del-ip-$ip"
-    debug_log "✅ Existing filters removed (precise deletion by handle)"
     
     # Add new filters to assign guest to lane 1:20 (10 Mbps)
     local count_before_add=$(get_filter_count)
