@@ -32,19 +32,19 @@ else
     echo "   ✗ Default routing issue!"
 fi
 
-if tc class show dev br-lan | grep -q "classid 1:10"; then
+if tc class show dev br-lan | grep -qE " 1:10 |^.*1:10 "; then
     echo "   ✓ Fast lane class (1:10) exists"
 else
     echo "   ✗ Fast lane class missing!"
 fi
 
-if tc class show dev br-lan | grep -q "classid 1:30"; then
+if tc class show dev br-lan | grep -qE " 1:30 |^.*1:30 "; then
     echo "   ✓ Slow lane class (1:30) exists"
 else
     echo "   ✗ Slow lane class missing!"
 fi
 
-if ! tc class show dev br-lan | grep -q "classid 1:20"; then
+if ! tc class show dev br-lan | grep -qE " 1:20 |^.*1:20 "; then
     echo "   ✓ Old guest lane (1:20) removed"
 else
     echo "   ⚠ Old guest lane (1:20) still exists"
