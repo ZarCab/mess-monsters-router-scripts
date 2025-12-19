@@ -79,8 +79,27 @@ echo "----------------------------------------" >> "$OUTPUT_FILE"
 crontab -l >> "$OUTPUT_FILE" 2>/dev/null || echo "No cron jobs found" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 7. VPN Configuration
-echo "7. VPN CONFIGURATION:" >> "$OUTPUT_FILE"
+# 7. Ad Blocker Configuration
+echo "7. AD BLOCKER CONFIGURATION:" >> "$OUTPUT_FILE"
+echo "----------------------------------------" >> "$OUTPUT_FILE"
+echo "Installed Ad Blocker Packages:" >> "$OUTPUT_FILE"
+opkg list-installed | grep -iE "adblock|adguard|pihole" >> "$OUTPUT_FILE" || echo "  No ad blocker packages found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "AdBlock UCI Configuration:" >> "$OUTPUT_FILE"
+uci show adblock >> "$OUTPUT_FILE" 2>/dev/null || echo "  No AdBlock config found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "AdGuard Home Configuration:" >> "$OUTPUT_FILE"
+uci show adguardhome >> "$OUTPUT_FILE" 2>/dev/null || echo "  No AdGuard Home config found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "DNS Block Lists (dnsmasq):" >> "$OUTPUT_FILE"
+cat /etc/dnsmasq.conf 2>/dev/null | grep -E "addn-hosts|conf-file|server" >> "$OUTPUT_FILE" || echo "  No custom DNS block lists found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+# 8. VPN Configuration
+echo "8. VPN CONFIGURATION:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "WireGuard Interfaces:" >> "$OUTPUT_FILE"
 uci show network | grep -E "wireguard|wg" >> "$OUTPUT_FILE" || echo "  No WireGuard config found" >> "$OUTPUT_FILE"
@@ -94,8 +113,8 @@ echo "VPN/Tunnel Network Interfaces:" >> "$OUTPUT_FILE"
 ip link show | grep -E "tun|wg|ppp" >> "$OUTPUT_FILE" || echo "  No VPN interfaces found" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 8. SSH Tunnel/Connection Scripts
-echo "8. SSH TUNNEL/CONNECTION SETUP:" >> "$OUTPUT_FILE"
+# 9. SSH Tunnel/Connection Scripts
+echo "9. SSH TUNNEL/CONNECTION SETUP:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "SSH Keys:" >> "$OUTPUT_FILE"
 ls -la /root/.ssh/ 2>/dev/null | grep -E "id_rsa|id_ed25519" >> "$OUTPUT_FILE" || echo "  No SSH keys found" >> "$OUTPUT_FILE"
@@ -109,22 +128,22 @@ echo "Router Connection Scripts:" >> "$OUTPUT_FILE"
 find /mnt/usb /usr/bin /root -name "*connect*" -o -name "*tunnel*" -o -name "*router-connect*" 2>/dev/null >> "$OUTPUT_FILE" || echo "  No connection scripts found" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 9. USB Mount Info
-echo "9. USB MOUNT INFO:" >> "$OUTPUT_FILE"
+# 10. USB Mount Info
+echo "10. USB MOUNT INFO:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "USB Mount Point:" >> "$OUTPUT_FILE"
 mount | grep "/mnt/usb" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 10. QoS Current State (for reference)
-echo "10. CURRENT QoS STATE (for reference):" >> "$OUTPUT_FILE"
+# 11. QoS Current State (for reference)
+echo "11. CURRENT QoS STATE (for reference):" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "QoS Classes:" >> "$OUTPUT_FILE"
 tc class show dev br-lan >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 11. OpenWrt Version
-echo "11. SYSTEM INFO:" >> "$OUTPUT_FILE"
+# 12. OpenWrt Version
+echo "12. SYSTEM INFO:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "OpenWrt Version:" >> "$OUTPUT_FILE"
 cat /etc/openwrt_release 2>/dev/null || echo "Not available" >> "$OUTPUT_FILE"
