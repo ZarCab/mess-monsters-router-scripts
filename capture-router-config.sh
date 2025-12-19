@@ -58,33 +58,73 @@ echo "----------------------------------------" >> "$OUTPUT_FILE"
 uci show dhcp | grep -A 5 "host" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 5. Script Locations and Cron
-echo "5. SCRIPT SETUP:" >> "$OUTPUT_FILE"
+# 5. All Scripts
+echo "5. ALL SCRIPTS:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
-echo "Script Location:" >> "$OUTPUT_FILE"
-echo "  /mnt/usb/update-device-controls.sh" >> "$OUTPUT_FILE"
+echo "Scripts in /mnt/usb/:" >> "$OUTPUT_FILE"
+ls -la /mnt/usb/*.sh 2>/dev/null | awk '{print "  " $9 " (" $5 " bytes)"}' >> "$OUTPUT_FILE" || echo "  No scripts found" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-echo "Cron Schedule:" >> "$OUTPUT_FILE"
-crontab -l | grep "update-device-controls" >> "$OUTPUT_FILE"
+echo "Scripts in /usr/bin/ (mess-monsters related):" >> "$OUTPUT_FILE"
+ls -la /usr/bin/*mess* /usr/bin/*router* /usr/bin/*guest* 2>/dev/null | awk '{print "  " $9}' >> "$OUTPUT_FILE" || echo "  No scripts found" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 6. USB Mount Info
-echo "6. USB MOUNT INFO:" >> "$OUTPUT_FILE"
+echo "Scripts in /root/ (if any):" >> "$OUTPUT_FILE"
+ls -la /root/*.sh 2>/dev/null | awk '{print "  " $9}' >> "$OUTPUT_FILE" || echo "  No scripts found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+# 6. All Cron Jobs
+echo "6. ALL CRON JOBS:" >> "$OUTPUT_FILE"
+echo "----------------------------------------" >> "$OUTPUT_FILE"
+crontab -l >> "$OUTPUT_FILE" 2>/dev/null || echo "No cron jobs found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+# 7. VPN Configuration
+echo "7. VPN CONFIGURATION:" >> "$OUTPUT_FILE"
+echo "----------------------------------------" >> "$OUTPUT_FILE"
+echo "WireGuard Interfaces:" >> "$OUTPUT_FILE"
+uci show network | grep -E "wireguard|wg" >> "$OUTPUT_FILE" || echo "  No WireGuard config found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "OpenVPN Configuration:" >> "$OUTPUT_FILE"
+uci show openvpn >> "$OUTPUT_FILE" 2>/dev/null || echo "  No OpenVPN config found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "VPN/Tunnel Network Interfaces:" >> "$OUTPUT_FILE"
+ip link show | grep -E "tun|wg|ppp" >> "$OUTPUT_FILE" || echo "  No VPN interfaces found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+# 8. SSH Tunnel/Connection Scripts
+echo "8. SSH TUNNEL/CONNECTION SETUP:" >> "$OUTPUT_FILE"
+echo "----------------------------------------" >> "$OUTPUT_FILE"
+echo "SSH Keys:" >> "$OUTPUT_FILE"
+ls -la /root/.ssh/ 2>/dev/null | grep -E "id_rsa|id_ed25519" >> "$OUTPUT_FILE" || echo "  No SSH keys found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "SSH Config:" >> "$OUTPUT_FILE"
+cat /root/.ssh/config 2>/dev/null >> "$OUTPUT_FILE" || echo "  No SSH config found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+echo "Router Connection Scripts:" >> "$OUTPUT_FILE"
+find /mnt/usb /usr/bin /root -name "*connect*" -o -name "*tunnel*" -o -name "*router-connect*" 2>/dev/null >> "$OUTPUT_FILE" || echo "  No connection scripts found" >> "$OUTPUT_FILE"
+echo "" >> "$OUTPUT_FILE"
+
+# 9. USB Mount Info
+echo "9. USB MOUNT INFO:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "USB Mount Point:" >> "$OUTPUT_FILE"
 mount | grep "/mnt/usb" >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 7. QoS Current State (for reference)
-echo "7. CURRENT QoS STATE (for reference):" >> "$OUTPUT_FILE"
+# 10. QoS Current State (for reference)
+echo "10. CURRENT QoS STATE (for reference):" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "QoS Classes:" >> "$OUTPUT_FILE"
 tc class show dev br-lan >> "$OUTPUT_FILE"
 echo "" >> "$OUTPUT_FILE"
 
-# 8. OpenWrt Version
-echo "8. SYSTEM INFO:" >> "$OUTPUT_FILE"
+# 11. OpenWrt Version
+echo "11. SYSTEM INFO:" >> "$OUTPUT_FILE"
 echo "----------------------------------------" >> "$OUTPUT_FILE"
 echo "OpenWrt Version:" >> "$OUTPUT_FILE"
 cat /etc/openwrt_release 2>/dev/null || echo "Not available" >> "$OUTPUT_FILE"
