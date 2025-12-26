@@ -5,7 +5,7 @@ CONFIG_FILE="/etc/mess-monsters/config.json"
 LOG_FILE="/var/log/device-controls.log"
 FILTER_LOG="/var/log/filter-operations.log"
 PHYSICAL_INTERFACE="br-lan"
-WAN_INTERFACE="eth0.2"
+WAN_INTERFACE="eth1"
 MARK_VALUE=5
 STATE_FILE="/tmp/device-controls-state.txt"
 
